@@ -426,6 +426,13 @@ var groups;
 var layerCount = 0;
 var visibleLayerCount = 0;
 var selectedLayerCount = 0;
+var csvManifestData = [];
+// Parallel to ddCsvTargetGroup items (index 0 = All Layers => "")
+var csvTargetGroupPaths = [];
+// When true: same as checking "Write CSV debug log" in the dialog (no UI needed for devs).
+var DEBUG_CSV_MANIFEST = false;
+// Set by the Manifest panel checkbox while the dialog is open.
+var csvManifestDebugEnabled = false;
 
 //
 // Entry point
@@ -616,6 +623,18 @@ function exportLayers(exportLayerTarget, progressBarWindow) {
             doc.trim(TrimType.TRANSPARENT);
         }
 
+        // CSV Manifest override: skip standard visibility toggling and export loop
+        if (prefs.csvEnabled && csvManifestData.length > 0) {
+            if (progressBarWindow) {
+                showProgressBar(progressBarWindow, "Exporting (CSV Manifest)...", csvManifestData.length);
+            }
+            exportLayersWithManifest(layersToExport, count, progressBarWindow, retVal);
+            if (progressBarWindow) {
+                progressBarWindow.hide();
+            }
+            return retVal;
+        }
+
         if (progressBarWindow) {
             showProgressBar(progressBarWindow, "Exporting 1 of " + count + "...", count);
         }
@@ -736,6 +755,125 @@ function exportLayers(exportLayerTarget, progressBarWindow) {
     return retVal;
 }
 
+function exportLayersWithManifest(layersToExport, count, progressBarWindow, retVal) {
+    var savedDialogMode = app.displayDialogs;
+    app.displayDialogs = DialogModes.NO;
+
+    var ext = prefs.fileExtension;
+    var startIdx = prefs.exportForeground ? 1 : 0;
+
+    // If a specific group is targeted, resolve path in the full group tree (nested folders included).
+    var filteredLayers = layersToExport;
+    if (prefs.csvTargetGroupName && prefs.csvTargetGroupName.length > 0 && groups) {
+        var wantPath = prefs.csvTargetGroupName;
+        var targetGroup = findScriptGroupByPath(groups, wantPath);
+        if (targetGroup) {
+            filteredLayers = [];
+            for (var f = startIdx; f < count; f++) {
+                var entry = layersToExport[f];
+                if (layerBelongsToGroup(entry, targetGroup)) {
+                    filteredLayers.push(entry);
+                }
+            }
+            count = filteredLayers.length;
+            startIdx = 0;
+            csvManifestDebugLog("exportLayersWithManifest", "targetGroup OK", wantPath, filteredLayers.length, layersToExport.length);
+        } else {
+            alert("CSV Manifest: could not find this folder in the collected layer tree (nested groups need the full path):\n\n" + wantPath + "\n\nThe export will use all layers in the current export set. Check the Target Folder choice or document structure.", "CSV Manifest", true);
+            csvManifestDebugLog("exportLayersWithManifest", "targetGroup NOT FOUND", wantPath, layersToExport.length, count);
+        }
+    }
+
+    // Hide every export-tracked layer so nothing outside the current target composites in.
+    for (var hi = 0; hi < layers.length; hi++) {
+        makeInvisible(layers[hi]);
+    }
+    try {
+        if (app.activeDocument.backgroundLayer) {
+            app.activeDocument.backgroundLayer.visible = false;
+        }
+    } catch (e) { /* no background layer */ }
+
+    var csvIdx = 0;
+    for (var i = startIdx; i < count; i++) {
+        var layerEntry = filteredLayers[i];
+        var layer = layerEntry.layer;
+
+        // Ignore layers with the ignore prefix
+        if (prefs.ignoreLayers
+            && prefs.ignoreLayersString.length > 0
+            && layer.name.indexOf(prefs.ignoreLayersString) === 0) { continue; }
+
+        storeHistory();
+        makeVisible(layerEntry);
+
+        // Always trim individual layer bounds in CSV mode so resize
+        // operates on actual content, not the full PSD canvas.
+        try { app.activeDocument.crop(layer.bounds); } catch (e) { }
+
+        var manifestEntry = (csvIdx < csvManifestData.length) ? csvManifestData[csvIdx] : null;
+
+        if (manifestEntry && manifestEntry.width > 0 && manifestEntry.height > 0) {
+            resizeImageToFit(manifestEntry.width, manifestEntry.height, manifestEntry.padding);
+            setCanvasToExactSize(manifestEntry.width, manifestEntry.height);
+
+            var localFolders = "";
+            if (!prefs.csvFlattenFolders) {
+                var parent = layerEntry.parent;
+                while (parent) {
+                    localFolders = makeValidFileName(parent.layer.name, prefs.useDelimiter) + "/" + localFolders;
+                    parent = parent.parent;
+                }
+            }
+
+            // Strip any file extension the user may have included in the CSV name
+            var safeName = makeValidFileName(manifestEntry.filename, prefs.useDelimiter);
+            var dotIdx = safeName.lastIndexOf(".");
+            if (dotIdx > 0) { safeName = safeName.substring(0, dotIdx); }
+            if (safeName.length === 0) { safeName = "untitled"; }
+            var filePath = prefs.destination + "/" + localFolders + safeName;
+
+            if (localFolders.length > 0) {
+                var parentFolder = (new File(filePath + ext)).parent;
+                createFolder(parentFolder);
+            }
+
+            var fileHandle = new File(filePath + ext);
+            saveImage(fileHandle);
+            ++retVal.count;
+        } else {
+            // Fallback: no matching CSV entry -- use original layer name, skip resizing
+            var fallbackName = makeValidFileName(layer.name, prefs.useDelimiter);
+            if (fallbackName.length === 0) { fallbackName = "Layer"; }
+            var fallbackPath = prefs.destination + "/" + fallbackName;
+            var fallbackHandle = new File(fallbackPath + ext);
+            saveImage(fallbackHandle);
+            ++retVal.count;
+        }
+
+        csvIdx++;
+        restoreHistory();
+        layer.visible = false;
+
+        if (progressBarWindow) {
+            updateProgressBar(progressBarWindow, "Exporting " + (i + 1) + " of " + count + "...");
+            repaintProgressBar(progressBarWindow);
+            if (userCancelled) { break; }
+        }
+    }
+
+    app.displayDialogs = savedDialogMode;
+}
+
+function layerBelongsToGroup(layerEntry, targetGroup) {
+    var parent = layerEntry.parent;
+    while (parent) {
+        if (parent.layer === targetGroup.layer) { return true; }
+        parent = parent.parent;
+    }
+    return false;
+}
+
 
 function scaleImage() {
     var width = app.activeDocument.width.as("px") * (prefs.scaleValue / 100);
@@ -752,6 +890,264 @@ function addPadding() {
     var heightUnit = new UnitValue(height + " pixels");
 
     app.activeDocument.resizeCanvas(widthUnit, heightUnit, AnchorPosition.MIDDLECENTER);
+}
+
+// =====================
+// CSV Manifest helpers
+// =====================
+
+function getLayerSetByPath(pathStr) {
+    if (!pathStr || pathStr.length === 0) { return null; }
+    var parts = pathStr.split("/");
+    var sets = app.activeDocument.layerSets;
+    var current = null;
+    for (var p = 0; p < parts.length; p++) {
+        var want = parts[p];
+        var found = null;
+        for (var s = 0; s < sets.length; s++) {
+            if (sets[s].name === want) {
+                found = sets[s];
+                break;
+            }
+        }
+        if (!found) { return null; }
+        current = found;
+        sets = found.layerSets;
+    }
+    return current;
+}
+
+// #region agent log
+// Human-readable CSV manifest diagnostics. Order: Desktop, temp, script folder, optional workspace .cursor path.
+function csvManifestDebugLog(location, message, n1, n2, n3) {
+    if (!DEBUG_CSV_MANIFEST && !csvManifestDebugEnabled) {
+        return;
+    }
+    var ts = new Date().toString();
+    var a = (n1 !== undefined && n1 !== null) ? String(n1) : "";
+    var b = (n2 !== undefined && n2 !== null) ? String(n2) : "";
+    var c = (n3 !== undefined && n3 !== null) ? String(n3) : "";
+    var line = ts + " | " + location + " | " + message + " | " + a + " | " + b + " | " + c;
+    try {
+        $.writeln("[CSV-Manifest] " + line);
+    } catch (eW) { }
+    var paths = [];
+    try {
+        paths.push(Folder.desktop.fsName + "/ExportLayersCSV-debug.log");
+    } catch (eD) { }
+    try {
+        paths.push(Folder.temp.fsName + "/ExportLayersCSV-debug.log");
+    } catch (eT) { }
+    if (typeof env !== "undefined" && env && env.scriptFileDirectory) {
+        paths.push(env.scriptFileDirectory + "/ExportLayersCSV-debug.log");
+    }
+    for (var pi = 0; pi < paths.length; pi++) {
+        try {
+            var lf = new File(paths[pi]);
+            lf.open("a");
+            lf.writeln(line);
+            lf.close();
+            return;
+        } catch (eF) { }
+    }
+}
+// #endregion
+
+function countExportableInLayerSet(layerSet, parentGroupsVisible) {
+    var groupVisibleChain = prefs.visibleOnly ? (parentGroupsVisible && layerSet.visible) : true;
+    var c = 0;
+    for (var i = 0; i < layerSet.artLayers.length; i++) {
+        var al = layerSet.artLayers[i];
+        if (isAdjustmentLayer(al)) { continue; }
+        if (prefs.visibleOnly) {
+            if (!groupVisibleChain || !al.visible) { continue; }
+            c++;
+        } else {
+            c++;
+        }
+    }
+    for (var j = 0; j < layerSet.layerSets.length; j++) {
+        c += countExportableInLayerSet(layerSet.layerSets[j], prefs.visibleOnly ? groupVisibleChain : true);
+    }
+    return c;
+}
+
+function countExportableLayersWholeDoc() {
+    var c = 0;
+    var doc = app.activeDocument;
+    for (var i = 0; i < doc.artLayers.length; i++) {
+        var al = doc.artLayers[i];
+        if (isAdjustmentLayer(al)) { continue; }
+        if (prefs.visibleOnly) {
+            if (!al.visible) { continue; }
+        }
+        c++;
+    }
+    for (var j = 0; j < doc.layerSets.length; j++) {
+        c += countExportableInLayerSet(doc.layerSets[j], true);
+    }
+    try {
+        var bg = doc.backgroundLayer;
+        if (!isAdjustmentLayer(bg)) {
+            c++;
+        }
+    } catch (e) { }
+    return c;
+}
+
+function countLayersInGroup(pathStr) {
+    if (!pathStr || pathStr.length === 0) { return 0; }
+    try {
+        var ls = getLayerSetByPath(pathStr);
+        var _cnt = ls ? countExportableInLayerSet(ls, true) : 0;
+        // #region agent log
+        csvManifestDebugLog("countLayersInGroup", "lookup", _cnt, prefs.visibleOnly ? 1 : 0, ls ? 1 : 0);
+        // #endregion
+        if (!ls) { return 0; }
+        return _cnt;
+    } catch (e) {
+        return 0;
+    }
+}
+
+// Layer count shown for CSV validation / review: matches export slot count (whole-doc subtracts background when not exported).
+function getManifestTargetLayerCountForUi(groupPath) {
+    var raw;
+    if (!groupPath || groupPath.length === 0) {
+        raw = countExportableLayersWholeDoc();
+        try {
+            if (!prefs.exportBackground && app.activeDocument.backgroundLayer) {
+                raw = Math.max(0, raw - 1);
+            }
+        } catch (e) { }
+    } else {
+        raw = countLayersInGroup(groupPath);
+    }
+    return raw;
+}
+
+function getPathForScriptGroup(groupEntry) {
+    var parts = [];
+    var g = groupEntry;
+    while (g && g.layer) {
+        parts.unshift(g.layer.name);
+        g = g.parent;
+    }
+    return parts.join("/");
+}
+
+// Walk collected group tree (root `groups` + nested group.children) to match dropdown path.
+function findScriptGroupInTree(groupNode, wantPath) {
+    if (!groupNode || groupNode.children === undefined) {
+        return null;
+    }
+    var path = getPathForScriptGroup(groupNode);
+    if (wantPath.indexOf("/") >= 0) {
+        if (path === wantPath) {
+            return groupNode;
+        }
+    } else {
+        if (groupNode.layer.name === wantPath) {
+            return groupNode;
+        }
+    }
+    for (var c = 0; c < groupNode.children.length; c++) {
+        var child = groupNode.children[c];
+        if (child.children !== undefined) {
+            var r = findScriptGroupInTree(child, wantPath);
+            if (r) {
+                return r;
+            }
+        }
+    }
+    return null;
+}
+
+function findScriptGroupByPath(rootGroupsArray, wantPath) {
+    if (!wantPath || wantPath.length === 0 || !rootGroupsArray) {
+        return null;
+    }
+    for (var i = 0; i < rootGroupsArray.length; i++) {
+        var found = findScriptGroupInTree(rootGroupsArray[i], wantPath);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+}
+
+function csvTrim(str) {
+    return str.replace(/^\s+/, "").replace(/\s+$/, "");
+}
+
+function parseCsvFile(filePath) {
+    var result = [];
+    var f = new File(filePath);
+    if (!f.exists) {
+        alert("CSV file not found:\n" + filePath, "CSV Error", true);
+        return result;
+    }
+    try {
+        f.open("r");
+        var firstLine = true;
+        while (!f.eof) {
+            var line = f.readln();
+            if (csvTrim(line).length === 0) { continue; }
+
+            var parts = line.split(",");
+            if (parts.length < 4) { continue; }
+
+            var col0 = csvTrim(parts[0]);
+
+            // Auto-detect and skip a text header row
+            if (firstLine) {
+                firstLine = false;
+                if (isNaN(parseInt(col0, 10))) { continue; }
+            }
+
+            var w = parseInt(col0, 10);
+            var h = parseInt(csvTrim(parts[1]), 10);
+            var p = parseInt(csvTrim(parts[2]), 10);
+            // Filename may contain commas inside quotes, but the spec says
+            // the format is simple: Width, Height, Padding, Filename.
+            // Rejoin remaining parts in case the name had commas.
+            var nameParts = [];
+            for (var k = 3; k < parts.length; k++) {
+                nameParts.push(csvTrim(parts[k]));
+            }
+            var fn = nameParts.join(",");
+
+            if (isNaN(w) || isNaN(h) || isNaN(p)) { continue; }
+            result.push({ width: w, height: h, padding: p, filename: fn });
+        }
+        f.close();
+    } catch (e) {
+        alert("Failed to read CSV file:\n" + e.message, "CSV Error", true);
+        return [];
+    }
+    return result;
+}
+
+function resizeImageToFit(canvasW, canvasH, padding) {
+    var doc = app.activeDocument;
+    var curW = doc.width.as("px");
+    var curH = doc.height.as("px");
+    if (curW <= 0 || curH <= 0) { return; }
+    var pad = Math.max(padding, 0);
+    var safeW = Math.max(canvasW - pad * 2, 1);
+    var safeH = Math.max(canvasH - pad * 2, 1);
+    var scale = Math.min(safeW / curW, safeH / curH);
+    var newW = Math.round(curW * scale);
+    var newH = Math.round(curH * scale);
+    doc.resizeImage(UnitValue(newW, "px"), UnitValue(newH, "px"), null, ResampleMethod.BICUBICSHARPER);
+}
+
+function setCanvasToExactSize(canvasW, canvasH) {
+    app.activeDocument.resizeCanvas(
+        UnitValue(canvasW, "px"),
+        UnitValue(canvasH, "px"),
+        AnchorPosition.MIDDLECENTER
+    );
 }
 
 function createFolder(folder) {
@@ -1109,6 +1505,205 @@ function finalizeSettingsPrerun() {
 // User interface
 //
 
+function showManifestReviewDialog(targetLayerCount) {
+    if (typeof targetLayerCount === "undefined") {
+        targetLayerCount = getManifestTargetLayerCountForUi("");
+    }
+    var _tln = parseInt(targetLayerCount, 10);
+    if (isNaN(_tln) || _tln < 0) {
+        _tln = 0;
+    }
+    targetLayerCount = _tln;
+    // #region agent log
+    csvManifestDebugLog("showManifestReviewDialog", "open", targetLayerCount, csvManifestData.length, (csvManifestData.length === targetLayerCount) ? 1 : 0);
+    // #endregion
+    var dlg = new Window("dialog", "Review / Edit Manifest");
+    dlg.orientation = "column";
+    dlg.alignChildren = ["fill", "top"];
+    dlg.preferredSize.width = 520;
+
+    // --- Header counts ---
+    var grpCounts = dlg.add("group");
+    grpCounts.orientation = "column";
+    grpCounts.alignChildren = ["left", "top"];
+    grpCounts.spacing = 4;
+    var lblLayerCount = grpCounts.add("statictext", undefined, "");
+    lblLayerCount.preferredSize.width = 480;
+    var lblManifestCount = grpCounts.add("statictext", undefined, "");
+    lblManifestCount.preferredSize.width = 480;
+    var lblMismatch = grpCounts.add("statictext", undefined, "");
+    lblMismatch.preferredSize.width = 480;
+
+    // Single-column list + multiline preview (multi-column ScriptUI listboxes often render blank on macOS).
+    var lblListHint = dlg.add("statictext", undefined, "Manifest rows (select one to edit below):");
+    lblListHint.preferredSize.width = 480;
+    var lstManifest = dlg.add("listbox", undefined, undefined, { name: "lstManifest" });
+    lstManifest.preferredSize = [480, 200];
+
+    var lblPreview = dlg.add("statictext", undefined, "Preview (all entries):");
+    lblPreview.preferredSize.width = 480;
+    var txtManifestPreview = dlg.add("edittext", undefined, "", { multiline: true, scrolling: true });
+    txtManifestPreview.preferredSize = [480, 120];
+    txtManifestPreview.enabled = false;
+
+    function manifestRowLabel(row) {
+        return String(row.width) + " x " + String(row.height) + "  pad " + String(row.padding) + "  |  " + row.filename;
+    }
+
+    function syncManifestPreview() {
+        var lines = [];
+        for (var pv = 0; pv < csvManifestData.length; pv++) {
+            lines.push(String(pv + 1) + ". " + manifestRowLabel(csvManifestData[pv]));
+        }
+        txtManifestPreview.text = lines.join("\n");
+    }
+
+    // --- Edit fields for selected row ---
+    var pnlEdit = dlg.add("panel", undefined, "Edit Selected Entry");
+    pnlEdit.orientation = "row";
+    pnlEdit.alignChildren = ["left", "center"];
+    pnlEdit.spacing = 6;
+
+    pnlEdit.add("statictext", undefined, "W:");
+    var txtEditW = pnlEdit.add("edittext", undefined, "");
+    txtEditW.preferredSize.width = 55;
+
+    pnlEdit.add("statictext", undefined, "H:");
+    var txtEditH = pnlEdit.add("edittext", undefined, "");
+    txtEditH.preferredSize.width = 55;
+
+    pnlEdit.add("statictext", undefined, "Pad:");
+    var txtEditP = pnlEdit.add("edittext", undefined, "");
+    txtEditP.preferredSize.width = 45;
+
+    pnlEdit.add("statictext", undefined, "Name:");
+    var txtEditName = pnlEdit.add("edittext", undefined, "");
+    txtEditName.preferredSize.width = 150;
+
+    var btnApply = pnlEdit.add("button", undefined, "Apply");
+
+    // When user selects a row, populate edit fields
+    lstManifest.onChange = function() {
+        var sel = lstManifest.selection;
+        if (sel) {
+            var idx = sel.index;
+            var entry = csvManifestData[idx];
+            txtEditW.text = String(entry.width);
+            txtEditH.text = String(entry.height);
+            txtEditP.text = String(entry.padding);
+            txtEditName.text = entry.filename;
+        }
+    };
+
+    // Apply edits back to data and listbox
+    btnApply.onClick = function() {
+        var sel = lstManifest.selection;
+        if (!sel) {
+            alert("Select a row first.", "Info");
+            return;
+        }
+        var idx = sel.index;
+        var w = parseInt(txtEditW.text, 10);
+        var h = parseInt(txtEditH.text, 10);
+        var p = parseInt(txtEditP.text, 10);
+        if (isNaN(w)) { w = 0; }
+        if (isNaN(h)) { h = 0; }
+        if (isNaN(p)) { p = 0; }
+        csvManifestData[idx].width = w;
+        csvManifestData[idx].height = h;
+        csvManifestData[idx].padding = p;
+        csvManifestData[idx].filename = csvTrim(txtEditName.text);
+
+        sel.text = manifestRowLabel(csvManifestData[idx]);
+        syncManifestPreview();
+    };
+
+    // --- Add / Delete buttons ---
+    var grpRowActions = dlg.add("group");
+    grpRowActions.orientation = "row";
+    grpRowActions.alignment = ["center", "top"];
+
+    var btnAdd = grpRowActions.add("button", undefined, "Add Entry");
+    var btnDelete = grpRowActions.add("button", undefined, "Delete Selected");
+
+    btnAdd.onClick = function() {
+        csvManifestData.push({ width: 0, height: 0, padding: 0, filename: "" });
+        refreshList();
+    };
+
+    btnDelete.onClick = function() {
+        var sel = lstManifest.selection;
+        if (!sel) {
+            alert("Select a row to delete.", "Info");
+            return;
+        }
+        var idx = sel.index;
+        var temp = [];
+        for (var i = 0; i < csvManifestData.length; i++) {
+            if (i !== idx) { temp.push(csvManifestData[i]); }
+        }
+        csvManifestData = temp;
+        refreshList();
+    };
+
+    // --- Confirm / Cancel ---
+    var grpButtons = dlg.add("group");
+    grpButtons.orientation = "row";
+    grpButtons.alignment = ["center", "top"];
+
+    // Do not use name "ok" — it becomes the default button and Enter can close the dialog without running onClick, bypassing mismatch checks.
+    var btnConfirm = grpButtons.add("button", undefined, "Confirm");
+    var btnCancel = grpButtons.add("button", undefined, "Cancel", { name: "cancel" });
+    dlg.cancelElement = btnCancel;
+
+    function updateMatchState() {
+        lblLayerCount.text = "Target layer count: " + targetLayerCount;
+        lblManifestCount.text = "Manifest entries: " + csvManifestData.length;
+        var ok = (csvManifestData.length === targetLayerCount);
+        lblMismatch.text = ok ? "" : "** MISMATCH ** — add/remove rows until counts match to enable Confirm.";
+        btnConfirm.enabled = ok;
+        // #region agent log
+        csvManifestDebugLog("updateMatchState", "labels", targetLayerCount, csvManifestData.length, ok ? 1 : 0);
+        // #endregion
+    }
+
+    function refreshList() {
+        lstManifest.removeAll();
+        for (var i = 0; i < csvManifestData.length; i++) {
+            lstManifest.add("item", manifestRowLabel(csvManifestData[i]));
+        }
+        syncManifestPreview();
+        updateMatchState();
+    }
+    refreshList();
+
+    btnConfirm.onClick = function() {
+        if (csvManifestData.length !== targetLayerCount) {
+            return;
+        }
+        // Validate: non-zero dimensions and non-empty filenames
+        for (var i = 0; i < csvManifestData.length; i++) {
+            var e = csvManifestData[i];
+            if (e.width <= 0 || e.height <= 0) {
+                alert("Row " + (i + 1) + " has invalid dimensions (width/height must be > 0).", "Validation Error", true);
+                return;
+            }
+            if (csvTrim(e.filename).length === 0) {
+                alert("Row " + (i + 1) + " has an empty filename.", "Validation Error", true);
+                return;
+            }
+        }
+        dlg.close(1);
+    };
+
+    btnCancel.onClick = function() {
+        dlg.close(0);
+    };
+
+    dlg.center();
+    return dlg.show();
+}
+
 function createProgressBar() {
     // read progress bar resource
     var rsrcFile = new File(env.scriptFileDirectory + "/" + encodeURI("Export Layers To Files (Fast)-progress_bar.json"));
@@ -1261,8 +1856,65 @@ function showDialog() {
     // ACTION SECTION
     // ==============
     fields.btnRun.onClick = function() {
+        // CSV Manifest: auto-parse and validate before running
+        if (fields.cbCsvEnabled.value) {
+            var csvPath = csvTrim(fields.txtCsvPath.text);
+            if (csvPath.length === 0) {
+                alert("CSV Manifest is enabled but no CSV file is selected.", "CSV Manifest", true);
+                return;
+            }
+            // Parse CSV if not already loaded
+            if (csvManifestData.length === 0) {
+                csvManifestData = parseCsvFile(csvPath);
+            }
+            if (csvManifestData.length === 0) {
+                alert("The CSV file is empty or could not be parsed.", "CSV Manifest", true);
+                return;
+            }
+            // Compute target count from dropdown index (parallel csvTargetGroupPaths — avoids selection.text quirks).
+            var selIdx = fields.ddCsvTargetGroup.selection ? fields.ddCsvTargetGroup.selection.index : 0;
+            var selectedGroupPath = (selIdx >= 0 && selIdx < csvTargetGroupPaths.length) ? csvTargetGroupPaths[selIdx] : "";
+            var targetLayerCount = getManifestTargetLayerCountForUi(selectedGroupPath);
+
+            // #region agent log
+            csvManifestDebugLog("btnRun", "csv run", selIdx, targetLayerCount, csvManifestData.length);
+            // #endregion
+
+            // Auto-open review dialog on count mismatch
+            if (csvManifestData.length !== targetLayerCount) {
+                // #region agent log
+                csvManifestDebugLog("btnRun", "mismatch", csvManifestData.length, targetLayerCount, csvManifestData.length - targetLayerCount);
+                // #endregion
+                var reviewResult = showManifestReviewDialog(targetLayerCount);
+                if (reviewResult !== 1) { return; }
+            }
+            // Store CSV prefs (runtime only)
+            prefs.csvEnabled = true;
+            prefs.csvFlattenFolders = fields.cbFlattenFolders.value;
+            prefs.csvFilePath = csvPath;
+            prefs.csvTargetGroupName = selectedGroupPath;
+        } else {
+            prefs.csvEnabled = false;
+            prefs.csvFlattenFolders = false;
+            prefs.csvFilePath = "";
+            prefs.csvTargetGroupName = "";
+            csvManifestData = [];
+        }
+
+        // Preserve CSV runtime prefs before finalizeSettingsPrerun wipes prefs
+        var _csvEnabled = prefs.csvEnabled;
+        var _csvFlattenFolders = prefs.csvFlattenFolders;
+        var _csvFilePath = prefs.csvFilePath;
+        var _csvTargetGroupName = prefs.csvTargetGroupName;
+
         saveSettings(dialog);
         finalizeSettingsPrerun();
+
+        // Restore CSV runtime prefs
+        prefs.csvEnabled = _csvEnabled;
+        prefs.csvFlattenFolders = _csvFlattenFolders;
+        prefs.csvFilePath = _csvFilePath;
+        prefs.csvTargetGroupName = _csvTargetGroupName;
     
         var format = Formats[prefs.fileType];
         fields.tabpnlExportOptions.selection = format.index;
@@ -1368,6 +2020,95 @@ function showDialog() {
     };
     fields.cbScale.onClick = function() {
         fields.grpScaleLabel.enabled = this.value;
+    };
+
+    // ========================
+    // CSV MANIFEST SECTION
+    // ========================
+    fields.cbCsvEnabled.value = false;
+    fields.cbFlattenFolders.value = false;
+    fields.cbCsvManifestDebug.value = false;
+    csvManifestDebugEnabled = false;
+    fields.txtCsvPath.text = "";
+
+    // Populate the target group dropdown from the live document's layer sets (recursive).
+    // (The script's `groups` array is not yet built at dialog time.)
+    csvTargetGroupPaths = [""];
+    fields.ddCsvTargetGroup.removeAll();
+    fields.ddCsvTargetGroup.add("item", "All Layers");
+    try {
+        var addGroupPathsToDropdown = function(layerSets, prefix) {
+            for (var g = 0; g < layerSets.length; g++) {
+                var pathStr = (prefix && prefix.length > 0) ? (prefix + "/" + layerSets[g].name) : layerSets[g].name;
+                csvTargetGroupPaths.push(pathStr);
+                fields.ddCsvTargetGroup.add("item", pathStr);
+                if (layerSets[g].layerSets.length > 0) {
+                    addGroupPathsToDropdown(layerSets[g].layerSets, pathStr);
+                }
+            }
+        };
+        addGroupPathsToDropdown(app.activeDocument.layerSets, "");
+    } catch (e) { /* no layer sets */ }
+    fields.ddCsvTargetGroup.selection = 0;
+    if (prefs.csvTargetGroupName && prefs.csvTargetGroupName.length > 0) {
+        var ddTgRestore = fields.ddCsvTargetGroup;
+        for (var tgi = 0; tgi < csvTargetGroupPaths.length && tgi < ddTgRestore.items.length; tgi++) {
+            if (csvTargetGroupPaths[tgi] === prefs.csvTargetGroupName) {
+                ddTgRestore.selection = tgi;
+                break;
+            }
+        }
+    }
+
+    // Disable CSV sub-controls until checkbox is enabled
+    fields.ddCsvTargetGroup.enabled = false;
+    fields.txtCsvPath.enabled = false;
+    fields.btnBrowseCsv.enabled = false;
+    fields.cbFlattenFolders.enabled = false;
+    fields.cbCsvManifestDebug.enabled = false;
+    fields.btnReviewManifest.enabled = false;
+
+    fields.cbCsvEnabled.onClick = function() {
+        var on = this.value;
+        fields.ddCsvTargetGroup.enabled = on;
+        fields.txtCsvPath.enabled = on;
+        fields.btnBrowseCsv.enabled = on;
+        fields.cbFlattenFolders.enabled = on;
+        fields.cbCsvManifestDebug.enabled = on;
+        fields.btnReviewManifest.enabled = on;
+
+        // When CSV override is active, disable standard padding/scale/naming
+        fields.cbPadding.enabled = !on;
+        fields.grpPaddingLabel.enabled = !on && fields.cbPadding.value;
+        fields.cbScale.enabled = !on;
+        fields.grpScaleLabel.enabled = !on && fields.cbScale.value;
+        fields.ddNameAs.enabled = !on;
+    };
+
+    fields.cbCsvManifestDebug.onClick = function() {
+        csvManifestDebugEnabled = this.value;
+    };
+
+    fields.btnBrowseCsv.onClick = function() {
+        var csvFile = File.openDialog("Select CSV manifest file", "CSV Files:*.csv,All Files:*.*");
+        if (csvFile) {
+            fields.txtCsvPath.text = csvFile.fsName;
+        }
+    };
+
+    fields.btnReviewManifest.onClick = function() {
+        var csvPath = fields.txtCsvPath.text;
+        if (csvTrim(csvPath).length === 0) {
+            alert("Please select a CSV file first.", "CSV Manifest", false);
+            return;
+        }
+        csvManifestData = parseCsvFile(csvPath);
+        if (csvManifestData.length === 0) { return; }
+
+        var rSelIdx = fields.ddCsvTargetGroup.selection ? fields.ddCsvTargetGroup.selection.index : 0;
+        var rGroupPath = (rSelIdx >= 0 && rSelIdx < csvTargetGroupPaths.length) ? csvTargetGroupPaths[rSelIdx] : "";
+        var rTargetCount = getManifestTargetLayerCountForUi(rGroupPath);
+        showManifestReviewDialog(rTargetCount);
     };
 
     // =================
@@ -2565,6 +3306,14 @@ function getDialogFields(dialog) {
         cbBmpFlipRowOrder: dialog.findElement("cbBmpFlipRowOrder"),
 
         lblMetadata: dialog.findElement("lblMetadata"),
+
+        cbCsvEnabled: dialog.findElement("cbCsvEnabled"),
+        ddCsvTargetGroup: dialog.findElement("ddCsvTargetGroup"),
+        txtCsvPath: dialog.findElement("txtCsvPath"),
+        btnBrowseCsv: dialog.findElement("btnBrowseCsv"),
+        cbFlattenFolders: dialog.findElement("cbFlattenFolders"),
+        cbCsvManifestDebug: dialog.findElement("cbCsvManifestDebug"),
+        btnReviewManifest: dialog.findElement("btnReviewManifest"),
     }
 }
 
@@ -2938,6 +3687,56 @@ function makeMainDialog() {
 
     var lblScale = grpScaleLabel.add("statictext", undefined, undefined, {name: "lblScale"}); 
     lblScale.text = "%"; 
+
+    // PNLMANIFEST
+    // ===========
+    var pnlManifest = grpCol2.add("panel", undefined, undefined, {name: "pnlManifest"}); 
+    pnlManifest.text = "Manifest Export (CSV)"; 
+    pnlManifest.orientation = "column"; 
+    pnlManifest.alignChildren = ["fill","top"]; 
+    pnlManifest.spacing = 5; 
+    pnlManifest.margins = 10; 
+    pnlManifest.alignment = ["fill","center"]; 
+
+    var cbCsvEnabled = pnlManifest.add("checkbox", undefined, undefined, {name: "cbCsvEnabled"}); 
+    cbCsvEnabled.text = "Enable CSV Manifest Override"; 
+
+    // GRPCSVTARGET
+    // ============
+    var grpCsvTarget = pnlManifest.add("group", undefined, {name: "grpCsvTarget"}); 
+    grpCsvTarget.orientation = "row"; 
+    grpCsvTarget.alignChildren = ["left","center"]; 
+    grpCsvTarget.spacing = 5; 
+    grpCsvTarget.margins = 0; 
+
+    var lblCsvTarget = grpCsvTarget.add("statictext", undefined, "Target Folder:"); 
+    var ddCsvTargetGroup = grpCsvTarget.add("dropdownlist", undefined, ["All Layers"], {name: "ddCsvTargetGroup"}); 
+    ddCsvTargetGroup.selection = 0; 
+    ddCsvTargetGroup.preferredSize.width = 280; 
+
+    // GRPCSVFILE
+    // ==========
+    var grpCsvFile = pnlManifest.add("group", undefined, {name: "grpCsvFile"}); 
+    grpCsvFile.orientation = "row"; 
+    grpCsvFile.alignChildren = ["left","center"]; 
+    grpCsvFile.spacing = 5; 
+    grpCsvFile.margins = 0; 
+
+    var txtCsvPath = grpCsvFile.add('edittext {properties: {name: "txtCsvPath"}}'); 
+    txtCsvPath.text = ""; 
+    txtCsvPath.preferredSize.width = 180; 
+
+    var btnBrowseCsv = grpCsvFile.add("button", undefined, undefined, {name: "btnBrowseCsv"}); 
+    btnBrowseCsv.text = "Browse..."; 
+
+    var cbFlattenFolders = pnlManifest.add("checkbox", undefined, undefined, {name: "cbFlattenFolders"}); 
+    cbFlattenFolders.text = "Flatten Nested Folders"; 
+
+    var cbCsvManifestDebug = pnlManifest.add("checkbox", undefined, undefined, {name: "cbCsvManifestDebug"});
+    cbCsvManifestDebug.text = "Write CSV debug log (Desktop: ExportLayersCSV-debug.log)";
+
+    var btnReviewManifest = pnlManifest.add("button", undefined, undefined, {name: "btnReviewManifest"}); 
+    btnReviewManifest.text = "Review/Edit Manifest"; 
 
     // PNLEXPORTAS
     // ===========
