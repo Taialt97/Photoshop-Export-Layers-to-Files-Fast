@@ -433,6 +433,8 @@ var csvTargetGroupPaths = [];
 var DEBUG_CSV_MANIFEST = false;
 // Set by the Manifest panel checkbox while the dialog is open.
 var csvManifestDebugEnabled = false;
+// When true: single visible CSV panel, legacy controls in a hidden group, native window close, no footer.
+var CSV_FOCUSED_UI = true;
 
 //
 // Entry point
@@ -1857,10 +1859,10 @@ function showDialog() {
     // ==============
     fields.btnRun.onClick = function() {
         // CSV Manifest: auto-parse and validate before running
-        if (fields.cbCsvEnabled.value) {
+        if (CSV_FOCUSED_UI || fields.cbCsvEnabled.value) {
             var csvPath = csvTrim(fields.txtCsvPath.text);
             if (csvPath.length === 0) {
-                alert("CSV Manifest is enabled but no CSV file is selected.", "CSV Manifest", true);
+                alert("Select a CSV manifest file.", "CSV Manifest", true);
                 return;
             }
             // Parse CSV if not already loaded
@@ -1893,7 +1895,7 @@ function showDialog() {
             prefs.csvFlattenFolders = fields.cbFlattenFolders.value;
             prefs.csvFilePath = csvPath;
             prefs.csvTargetGroupName = selectedGroupPath;
-        } else {
+        } else if (!CSV_FOCUSED_UI) {
             prefs.csvEnabled = false;
             prefs.csvFlattenFolders = false;
             prefs.csvFilePath = "";
@@ -1922,15 +1924,19 @@ function showDialog() {
         dialog.close(1);
     };
 
-    fields.btnSaveAndCancel.enabled = env.cs3OrHigher;
-    fields.btnSaveAndCancel.onClick = function() {
-        saveSettings(dialog);
-        dialog.close(0);
-    };
+    if (fields.btnSaveAndCancel) {
+        fields.btnSaveAndCancel.enabled = env.cs3OrHigher;
+        fields.btnSaveAndCancel.onClick = function() {
+            saveSettings(dialog);
+            dialog.close(0);
+        };
+    }
 
-    fields.btnCancel.onClick = function() {
-        dialog.close(0);
-    };
+    if (fields.btnCancel) {
+        fields.btnCancel.onClick = function() {
+            dialog.close(0);
+        };
+    }
 
     fields.cbOverwriteFiles.value = prefs.overwrite;
     fields.cbSilent.value = prefs.silent;
@@ -2025,7 +2031,11 @@ function showDialog() {
     // ========================
     // CSV MANIFEST SECTION
     // ========================
-    fields.cbCsvEnabled.value = false;
+    if (CSV_FOCUSED_UI) {
+        fields.cbCsvEnabled.value = true;
+    } else {
+        fields.cbCsvEnabled.value = false;
+    }
     fields.cbFlattenFolders.value = false;
     fields.cbCsvManifestDebug.value = false;
     csvManifestDebugEnabled = false;
@@ -2060,30 +2070,42 @@ function showDialog() {
         }
     }
 
-    // Disable CSV sub-controls until checkbox is enabled
-    fields.ddCsvTargetGroup.enabled = false;
-    fields.txtCsvPath.enabled = false;
-    fields.btnBrowseCsv.enabled = false;
-    fields.cbFlattenFolders.enabled = false;
-    fields.cbCsvManifestDebug.enabled = false;
-    fields.btnReviewManifest.enabled = false;
+    if (CSV_FOCUSED_UI) {
+        fields.ddCsvTargetGroup.enabled = true;
+        fields.txtCsvPath.enabled = true;
+        fields.btnBrowseCsv.enabled = true;
+        fields.cbFlattenFolders.enabled = true;
+        fields.cbCsvManifestDebug.enabled = true;
+        fields.btnReviewManifest.enabled = true;
+        fields.cbPadding.enabled = false;
+        fields.grpPaddingLabel.enabled = false;
+        fields.cbScale.enabled = false;
+        fields.grpScaleLabel.enabled = false;
+        fields.ddNameAs.enabled = false;
+    } else {
+        fields.ddCsvTargetGroup.enabled = false;
+        fields.txtCsvPath.enabled = false;
+        fields.btnBrowseCsv.enabled = false;
+        fields.cbFlattenFolders.enabled = false;
+        fields.cbCsvManifestDebug.enabled = false;
+        fields.btnReviewManifest.enabled = false;
 
-    fields.cbCsvEnabled.onClick = function() {
-        var on = this.value;
-        fields.ddCsvTargetGroup.enabled = on;
-        fields.txtCsvPath.enabled = on;
-        fields.btnBrowseCsv.enabled = on;
-        fields.cbFlattenFolders.enabled = on;
-        fields.cbCsvManifestDebug.enabled = on;
-        fields.btnReviewManifest.enabled = on;
+        fields.cbCsvEnabled.onClick = function() {
+            var on = this.value;
+            fields.ddCsvTargetGroup.enabled = on;
+            fields.txtCsvPath.enabled = on;
+            fields.btnBrowseCsv.enabled = on;
+            fields.cbFlattenFolders.enabled = on;
+            fields.cbCsvManifestDebug.enabled = on;
+            fields.btnReviewManifest.enabled = on;
 
-        // When CSV override is active, disable standard padding/scale/naming
-        fields.cbPadding.enabled = !on;
-        fields.grpPaddingLabel.enabled = !on && fields.cbPadding.value;
-        fields.cbScale.enabled = !on;
-        fields.grpScaleLabel.enabled = !on && fields.cbScale.value;
-        fields.ddNameAs.enabled = !on;
-    };
+            fields.cbPadding.enabled = !on;
+            fields.grpPaddingLabel.enabled = !on && fields.cbPadding.value;
+            fields.cbScale.enabled = !on;
+            fields.grpScaleLabel.enabled = !on && fields.cbScale.value;
+            fields.ddNameAs.enabled = !on;
+        };
+    }
 
     fields.cbCsvManifestDebug.onClick = function() {
         csvManifestDebugEnabled = this.value;
@@ -2273,7 +2295,66 @@ function showDialog() {
     // ================
     // METADATA MESSAGE
     // ================
-    fields.lblMetadata.text = formatString(fields.lblMetadata.text, layerCount, visibleLayerCount, selectedLayerCount);
+    if (fields.lblMetadata) {
+        fields.lblMetadata.text = formatString(fields.lblMetadata.text, layerCount, visibleLayerCount, selectedLayerCount);
+    }
+
+    // CSV-focused mode: title-bar close has no Cancel button. Per ScriptUI docs, modal show()
+    // returns the value passed to close(); if the window is dismissed without that path, it returns 0.
+    // main() only continues when showDialog() === 1, so OS close should not start export.
+
+    if (CSV_FOCUSED_UI) {
+        function csvApplyWindowSize(contentW, contentH) {
+            var dm = dialog.margins || [0, 0, 0, 0];
+            var chromeX = (dm[0] || 0) + (dm[2] || 0) + 28;
+            var chromeY = (dm[1] || 0) + (dm[3] || 0) + 48;
+            var fw = Math.max(400, Math.ceil(contentW) + chromeX);
+            var fh = Math.max(320, Math.ceil(contentH) + chromeY);
+            try {
+                dialog.preferredSize = [fw, fh];
+            } catch (ePs) { }
+            try {
+                dialog.size = [fw, fh];
+            } catch (eSz) { }
+            try {
+                var db = dialog.bounds;
+                if (db && db.length >= 4) {
+                    dialog.bounds = [db[0], db[1], db[0] + fw, db[1] + fh];
+                }
+            } catch (eBd) { }
+        }
+        function csvLayoutRelayout() {
+            if (dialog.layout && dialog.layout.layout) {
+                dialog.layout.layout(true);
+            }
+            if (dialog.layout && dialog.layout.resize) {
+                dialog.layout.resize();
+            }
+        }
+        function csvPackFromPanel() {
+            var pnlCsv = dialog.findElement("pnlCsvExport");
+            if (!pnlCsv || !pnlCsv.bounds) {
+                return;
+            }
+            var bb = pnlCsv.bounds;
+            var gw = bb[2] - bb[0];
+            var gh = bb[3] - bb[1];
+            if (gw > 10 && gh > 10) {
+                csvApplyWindowSize(gw, gh);
+            }
+        }
+        try {
+            csvApplyWindowSize(420, 360);
+            csvLayoutRelayout();
+        } catch (eCsvLayout1) { }
+        var pass;
+        for (pass = 0; pass < 2; pass++) {
+            try {
+                csvPackFromPanel();
+                csvLayoutRelayout();
+            } catch (eCsvPass) { }
+        }
+    }
 
     dialog.center();
     return dialog.show();
@@ -3320,51 +3401,92 @@ function getDialogFields(dialog) {
 function makeMainDialog() {    
     // DIALOG
     // ======
-    var dialog = new Window("dialog", undefined, undefined, {closeButton: false, resizeable: true}); 
-    dialog.text = "Export Layers To Files v2.7.1"; 
+    var dialog = CSV_FOCUSED_UI
+        ? new Window("dialog", undefined, [0, 0, 460, 420], {closeButton: true, resizeable: true})
+        : new Window("dialog", undefined, undefined, {closeButton: false, resizeable: true});
+    dialog.text = CSV_FOCUSED_UI ? "CSV Manifest Export" : "Export Layers To Files v2.7.1";
     dialog.orientation = "column"; 
-    dialog.alignChildren = ["center","center"]; 
-    dialog.spacing = 5; 
-    dialog.margins = [10,10,10,5]; 
+    // CSV mode: top-align so the visible panel stays at the top; center/center stacks oddly with a hidden sibling.
+    dialog.alignChildren = CSV_FOCUSED_UI ? ["fill", "top"] : ["center", "center"];
+    dialog.spacing = CSV_FOCUSED_UI ? 4 : 5;
+    dialog.margins = CSV_FOCUSED_UI ? [8, 8, 8, 8] : [10, 10, 10, 5];
 
-    // GRPCOLCONTAINER
-    // ===============
-    var grpColContainer = dialog.add("group", undefined, {name: "grpColContainer"}); 
-    grpColContainer.orientation = "row"; 
-    grpColContainer.alignChildren = ["center","center"]; 
-    grpColContainer.spacing = 10; 
-    grpColContainer.margins = 0; 
+    var grpLegacyHidden = null;
+    var legacyCol = null;
+    var pnlCsvExport = null;
+    var grpColContainer = null;
+    var grpCol1 = null;
+    var grpCol2 = null;
+    var pnlDestination = null;
 
-    // GRPCOL1
-    // =======
-    var grpCol1 = grpColContainer.add("group", undefined, {name: "grpCol1"}); 
-    grpCol1.orientation = "column"; 
-    grpCol1.alignChildren = ["left","center"]; 
-    grpCol1.spacing = 17; 
-    grpCol1.margins = 0; 
-    grpCol1.alignment = ["center","top"]; 
+    if (CSV_FOCUSED_UI) {
+        // Visible panel must be the first dialog child: on macOS, an invisible legacy group still
+        // participates in layout and can push content off-screen if listed first.
+        pnlCsvExport = dialog.add("panel", undefined, undefined, {name: "pnlCsvExport"});
+        pnlCsvExport.text = "CSV manifest export";
+        pnlCsvExport.orientation = "column";
+        pnlCsvExport.alignChildren = ["fill", "top"];
+        pnlCsvExport.spacing = 6;
+        pnlCsvExport.margins = 8;
+        pnlCsvExport.alignment = ["fill", "top"];
 
-    // PNLDESTINATION
-    // ==============
-    var pnlDestination = grpCol1.add("panel", undefined, undefined, {name: "pnlDestination"}); 
-    pnlDestination.text = "Output Destination"; 
-    pnlDestination.orientation = "row"; 
-    pnlDestination.alignChildren = ["left","center"]; 
-    pnlDestination.spacing = 10; 
-    pnlDestination.margins = 10; 
-    pnlDestination.alignment = ["left","center"]; 
+        grpLegacyHidden = dialog.add("group", undefined, {name: "grpLegacyHidden"});
+        grpLegacyHidden.visible = false;
+        grpLegacyHidden.margins = 0;
+        legacyCol = grpLegacyHidden.add("group");
+        legacyCol.orientation = "column";
+        legacyCol.alignChildren = ["left", "top"];
+        legacyCol.spacing = 6;
+    } else {
+        // GRPCOLCONTAINER
+        grpColContainer = dialog.add("group", undefined, {name: "grpColContainer"});
+        grpColContainer.orientation = "row";
+        grpColContainer.alignChildren = ["center","center"];
+        grpColContainer.spacing = 10;
+        grpColContainer.margins = 0;
 
-    var txtDestination = pnlDestination.add('edittext {properties: {name: "txtDestination"}}'); 
-    txtDestination.helpTip = "Where to save the files"; 
-    txtDestination.preferredSize.width = 200; 
+        grpCol1 = grpColContainer.add("group", undefined, {name: "grpCol1"});
+        grpCol1.orientation = "column";
+        grpCol1.alignChildren = ["left","center"];
+        grpCol1.spacing = 17;
+        grpCol1.margins = 0;
+        grpCol1.alignment = ["center","top"];
 
-    var btnBrowse = pnlDestination.add("button", undefined, undefined, {name: "btnBrowse"}); 
-    btnBrowse.text = "Browse..."; 
-    btnBrowse.justify = "left"; 
+        pnlDestination = grpCol1.add("panel", undefined, undefined, {name: "pnlDestination"});
+        pnlDestination.text = "Output destination & format";
+        pnlDestination.orientation = "column";
+        pnlDestination.alignChildren = ["fill", "top"];
+        pnlDestination.spacing = 8;
+        pnlDestination.margins = 10;
+        pnlDestination.alignment = ["fill", "center"];
+
+        grpCol2 = grpColContainer.add("group", undefined, {name: "grpCol2"});
+        grpCol2.orientation = "column";
+        grpCol2.alignChildren = ["left","center"];
+        grpCol2.spacing = 10;
+        grpCol2.margins = 0;
+        grpCol2.alignment = ["center","top"];
+    }
+
+    var formatActionsParent = CSV_FOCUSED_UI ? pnlCsvExport : pnlDestination;
+
+    var grpDestPath = formatActionsParent.add("group", undefined, {name: "grpDestPath"});
+    grpDestPath.orientation = "row";
+    grpDestPath.alignChildren = ["left", "center"];
+    grpDestPath.spacing = 10;
+    grpDestPath.margins = 0;
+
+    var txtDestination = grpDestPath.add('edittext {properties: {name: "txtDestination"}}');
+    txtDestination.helpTip = "Where to save the files";
+    txtDestination.preferredSize.width = 200;
+
+    var btnBrowse = grpDestPath.add("button", undefined, undefined, {name: "btnBrowse"});
+    btnBrowse.text = "Browse...";
+    btnBrowse.justify = "left";
 
     // PNLEXPORT
     // =========
-    var pnlExport = grpCol1.add("panel", undefined, undefined, {name: "pnlExport"}); 
+    var pnlExport = (CSV_FOCUSED_UI ? legacyCol : grpCol1).add("panel", undefined, undefined, {name: "pnlExport"}); 
     pnlExport.text = "Export"; 
     pnlExport.orientation = "column"; 
     pnlExport.alignChildren = ["left","top"]; 
@@ -3420,7 +3542,7 @@ function makeMainDialog() {
 
     // PNLNAMEFILES
     // ============
-    var pnlNameFiles = grpCol1.add("panel", undefined, undefined, {name: "pnlNameFiles"}); 
+    var pnlNameFiles = (CSV_FOCUSED_UI ? legacyCol : grpCol1).add("panel", undefined, undefined, {name: "pnlNameFiles"}); 
     pnlNameFiles.text = "Filenames"; 
     pnlNameFiles.orientation = "column"; 
     pnlNameFiles.alignChildren = ["left","top"]; 
@@ -3506,60 +3628,9 @@ function makeMainDialog() {
     txtSuffix.helpTip = "Suffix will be added after every layer name"; 
     txtSuffix.preferredSize.width = 100; 
 
-    // GRPCOL2
-    // =======
-    var grpCol2 = grpColContainer.add("group", undefined, {name: "grpCol2"}); 
-    grpCol2.orientation = "column"; 
-    grpCol2.alignChildren = ["left","center"]; 
-    grpCol2.spacing = 10; 
-    grpCol2.margins = 0; 
-    grpCol2.alignment = ["center","top"]; 
-
-    // GRPACTIONS
-    // ==========
-    var grpActions = grpCol2.add("group", undefined, {name: "grpActions"}); 
-    grpActions.orientation = "column"; 
-    grpActions.alignChildren = ["fill","top"]; 
-    grpActions.spacing = 5; 
-    grpActions.margins = [0,0,0,1]; 
-    grpActions.alignment = ["fill","center"]; 
-
-    var btnRun = grpActions.add("button", undefined, undefined, {name: "btnRun"}); 
-    btnRun.helpTip = "Runs the script with the selected settings"; 
-    btnRun.text = "Run"; 
-
-    // GRPCLOSEBUTTONS
-    // ===============
-    var grpCloseButtons = grpActions.add("group", undefined, {name: "grpCloseButtons"}); 
-    grpCloseButtons.orientation = "row"; 
-    grpCloseButtons.alignChildren = ["center","top"]; 
-    grpCloseButtons.spacing = 10; 
-    grpCloseButtons.margins = 0; 
-
-    var btnCancel = grpCloseButtons.add("button", undefined, undefined, {name: "btnCancel"}); 
-    btnCancel.helpTip = "Closes the dialog and does not save any changes"; 
-    btnCancel.text = "Cancel"; 
-    btnCancel.preferredSize.width = 111; 
-
-    var btnSaveAndCancel = grpCloseButtons.add("button", undefined, undefined, {name: "btnSaveAndCancel"}); 
-    btnSaveAndCancel.helpTip = "Closes the dialog but saves any changes made"; 
-    btnSaveAndCancel.text = "Save and Close"; 
-
-    // GRPACTIONS
-    // ==========
-    var cbOverwriteFiles = grpActions.add("checkbox", undefined, undefined, {name: "cbOverwriteFiles"}); 
-    cbOverwriteFiles.helpTip = "If checked, will overwrite existing files if they have the same name. Otherwise it will make unique copies"; 
-    cbOverwriteFiles.text = "Overwrite Existing Files"; 
-    cbOverwriteFiles.alignment = ["center","top"]; 
-
-    var cbSilent = grpActions.add("checkbox", undefined, undefined, {name: "cbSilent"}); 
-    cbSilent.helpTip = "If checked, will run without a progress bar and success confirmation."; 
-    cbSilent.text = "Run Silently"; 
-    cbSilent.alignment = ["center","top"]; 
-
     // PNLOUTPUT
     // =========
-    var pnlOutput = grpCol2.add("panel", undefined, undefined, {name: "pnlOutput"}); 
+    var pnlOutput = (CSV_FOCUSED_UI ? legacyCol : grpCol2).add("panel", undefined, undefined, {name: "pnlOutput"}); 
     pnlOutput.text = "Output Options"; 
     pnlOutput.orientation = "column"; 
     pnlOutput.alignChildren = ["left","top"]; 
@@ -3610,7 +3681,7 @@ function makeMainDialog() {
 
     // PNLMODIFYLAYERS
     // ===============
-    var pnlModifyLayers = grpCol2.add("panel", undefined, undefined, {name: "pnlModifyLayers"}); 
+    var pnlModifyLayers = (CSV_FOCUSED_UI ? legacyCol : grpCol2).add("panel", undefined, undefined, {name: "pnlModifyLayers"}); 
     pnlModifyLayers.text = "Modify Layers"; 
     pnlModifyLayers.orientation = "column"; 
     pnlModifyLayers.alignChildren = ["left","top"]; 
@@ -3688,73 +3759,26 @@ function makeMainDialog() {
     var lblScale = grpScaleLabel.add("statictext", undefined, undefined, {name: "lblScale"}); 
     lblScale.text = "%"; 
 
-    // PNLMANIFEST
+    // PNLEXPORTAS (under formatActionsParent: pnlDestination legacy, or pnlCsvExport)
     // ===========
-    var pnlManifest = grpCol2.add("panel", undefined, undefined, {name: "pnlManifest"}); 
-    pnlManifest.text = "Manifest Export (CSV)"; 
-    pnlManifest.orientation = "column"; 
-    pnlManifest.alignChildren = ["fill","top"]; 
-    pnlManifest.spacing = 5; 
-    pnlManifest.margins = 10; 
-    pnlManifest.alignment = ["fill","center"]; 
-
-    var cbCsvEnabled = pnlManifest.add("checkbox", undefined, undefined, {name: "cbCsvEnabled"}); 
-    cbCsvEnabled.text = "Enable CSV Manifest Override"; 
-
-    // GRPCSVTARGET
-    // ============
-    var grpCsvTarget = pnlManifest.add("group", undefined, {name: "grpCsvTarget"}); 
-    grpCsvTarget.orientation = "row"; 
-    grpCsvTarget.alignChildren = ["left","center"]; 
-    grpCsvTarget.spacing = 5; 
-    grpCsvTarget.margins = 0; 
-
-    var lblCsvTarget = grpCsvTarget.add("statictext", undefined, "Target Folder:"); 
-    var ddCsvTargetGroup = grpCsvTarget.add("dropdownlist", undefined, ["All Layers"], {name: "ddCsvTargetGroup"}); 
-    ddCsvTargetGroup.selection = 0; 
-    ddCsvTargetGroup.preferredSize.width = 280; 
-
-    // GRPCSVFILE
-    // ==========
-    var grpCsvFile = pnlManifest.add("group", undefined, {name: "grpCsvFile"}); 
-    grpCsvFile.orientation = "row"; 
-    grpCsvFile.alignChildren = ["left","center"]; 
-    grpCsvFile.spacing = 5; 
-    grpCsvFile.margins = 0; 
-
-    var txtCsvPath = grpCsvFile.add('edittext {properties: {name: "txtCsvPath"}}'); 
-    txtCsvPath.text = ""; 
-    txtCsvPath.preferredSize.width = 180; 
-
-    var btnBrowseCsv = grpCsvFile.add("button", undefined, undefined, {name: "btnBrowseCsv"}); 
-    btnBrowseCsv.text = "Browse..."; 
-
-    var cbFlattenFolders = pnlManifest.add("checkbox", undefined, undefined, {name: "cbFlattenFolders"}); 
-    cbFlattenFolders.text = "Flatten Nested Folders"; 
-
-    var cbCsvManifestDebug = pnlManifest.add("checkbox", undefined, undefined, {name: "cbCsvManifestDebug"});
-    cbCsvManifestDebug.text = "Write CSV debug log (Desktop: ExportLayersCSV-debug.log)";
-
-    var btnReviewManifest = pnlManifest.add("button", undefined, undefined, {name: "btnReviewManifest"}); 
-    btnReviewManifest.text = "Review/Edit Manifest"; 
-
-    // PNLEXPORTAS
-    // ===========
-    var pnlExportAs = dialog.add("panel", undefined, undefined, {name: "pnlExportAs", borderStyle: "none"}); 
+    var pnlExportAs = formatActionsParent.add("panel", undefined, undefined, {name: "pnlExportAs", borderStyle: "none"}); 
     pnlExportAs.text = "Export As"; 
     pnlExportAs.orientation = "column"; 
-    pnlExportAs.alignChildren = ["center","center"]; 
-    pnlExportAs.spacing = 10; 
-    pnlExportAs.margins = [0,6,0,0]; 
-    pnlExportAs.alignment = ["fill","center"]; 
+    pnlExportAs.alignChildren = CSV_FOCUSED_UI ? ["fill", "top"] : ["center", "center"];
+    pnlExportAs.spacing = CSV_FOCUSED_UI ? 6 : 10;
+    pnlExportAs.margins = CSV_FOCUSED_UI ? [0, 4, 0, 0] : [0, 6, 0, 0];
+    pnlExportAs.alignment = CSV_FOCUSED_UI ? ["fill", "top"] : ["fill", "center"];
 
     // TABPNLEXPORTOPTIONS
     // ===================
     var tabpnlExportOptions = pnlExportAs.add("tabbedpanel", undefined, undefined, {name: "tabpnlExportOptions"}); 
     tabpnlExportOptions.alignChildren = "fill"; 
-    tabpnlExportOptions.preferredSize.width = 554.625; 
+    tabpnlExportOptions.preferredSize.width = 400;
+    if (CSV_FOCUSED_UI) {
+        tabpnlExportOptions.preferredSize.height = 260;
+    }
     tabpnlExportOptions.margins = 0; 
-    tabpnlExportOptions.alignment = ["fill","center"]; 
+    tabpnlExportOptions.alignment = CSV_FOCUSED_UI ? ["fill", "top"] : ["fill", "center"];
 
     // TABPNG24
     // ========
@@ -4242,19 +4266,133 @@ function makeMainDialog() {
     // ===================
     tabpnlExportOptions.selection = tabPng24; 
 
-    // DIALOG
+    // PNLMANIFEST
+    // ===========
+    var _manifestParent = CSV_FOCUSED_UI ? pnlCsvExport : grpCol2;
+    var pnlManifest = _manifestParent.add("panel", undefined, undefined, {name: "pnlManifest"});
+    pnlManifest.text = "Manifest Export (CSV)";
+    pnlManifest.orientation = "column";
+    pnlManifest.alignChildren = ["fill", "top"];
+    pnlManifest.spacing = 5;
+    pnlManifest.margins = 10;
+    pnlManifest.alignment = ["fill", "center"];
+
+    var cbCsvEnabled;
+    if (!CSV_FOCUSED_UI) {
+        cbCsvEnabled = pnlManifest.add("checkbox", undefined, undefined, {name: "cbCsvEnabled"});
+        cbCsvEnabled.text = "Enable CSV Manifest Override";
+    } else {
+        var grpCsvEnableHide = legacyCol.add("group", undefined, {name: "grpCsvEnableHide"});
+        grpCsvEnableHide.visible = false;
+        cbCsvEnabled = grpCsvEnableHide.add("checkbox", undefined, undefined, {name: "cbCsvEnabled"});
+        cbCsvEnabled.text = "Enable CSV Manifest Override";
+    }
+
+    // GRPCSVTARGET
+    // ============
+    var grpCsvTarget = pnlManifest.add("group", undefined, {name: "grpCsvTarget"});
+    grpCsvTarget.orientation = "row";
+    grpCsvTarget.alignChildren = ["left", "center"];
+    grpCsvTarget.spacing = 5;
+    grpCsvTarget.margins = 0;
+
+    var lblCsvTarget = grpCsvTarget.add("statictext", undefined, "Target Folder:");
+    var ddCsvTargetGroup = grpCsvTarget.add("dropdownlist", undefined, ["All Layers"], {name: "ddCsvTargetGroup"});
+    ddCsvTargetGroup.selection = 0;
+    ddCsvTargetGroup.preferredSize.width = 280;
+
+    // GRPCSVFILE
+    // ==========
+    var grpCsvFile = pnlManifest.add("group", undefined, {name: "grpCsvFile"});
+    grpCsvFile.orientation = "row";
+    grpCsvFile.alignChildren = ["left", "center"];
+    grpCsvFile.spacing = 5;
+    grpCsvFile.margins = 0;
+
+    var txtCsvPath = grpCsvFile.add('edittext {properties: {name: "txtCsvPath"}}');
+    txtCsvPath.text = "";
+    txtCsvPath.preferredSize.width = 180;
+
+    var btnBrowseCsv = grpCsvFile.add("button", undefined, undefined, {name: "btnBrowseCsv"});
+    btnBrowseCsv.text = "Browse...";
+
+    var cbFlattenFolders = pnlManifest.add("checkbox", undefined, undefined, {name: "cbFlattenFolders"});
+    cbFlattenFolders.text = "Flatten Nested Folders";
+
+    var cbCsvManifestDebug = pnlManifest.add("checkbox", undefined, undefined, {name: "cbCsvManifestDebug"});
+    cbCsvManifestDebug.text = "Write CSV debug log (Desktop: ExportLayersCSV-debug.log)";
+
+    var btnReviewManifest = pnlManifest.add("button", undefined, undefined, {name: "btnReviewManifest"});
+    btnReviewManifest.text = "Review/Edit Manifest";
+
+    // GRPACTIONS (under manifest + format tabs)
+    // ==========
+    var grpActions = formatActionsParent.add("group", undefined, {name: "grpActions"});
+    grpActions.orientation = "column";
+    grpActions.alignChildren = ["fill", "top"];
+    grpActions.spacing = 5;
+    grpActions.margins = [0, 4, 0, 0];
+    grpActions.alignment = CSV_FOCUSED_UI ? ["fill", "top"] : ["fill", "center"];
+
+    var btnRun = grpActions.add("button", undefined, undefined, {name: "btnRun"});
+    btnRun.helpTip = "Start export using the current settings";
+    btnRun.text = "Start Export";
+
+    if (!CSV_FOCUSED_UI) {
+        // GRPCLOSEBUTTONS
+        // ===============
+        var grpCloseButtons = grpActions.add("group", undefined, {name: "grpCloseButtons"});
+        grpCloseButtons.orientation = "row";
+        grpCloseButtons.alignChildren = ["center", "top"];
+        grpCloseButtons.spacing = 10;
+        grpCloseButtons.margins = 0;
+
+        var btnCancel = grpCloseButtons.add("button", undefined, undefined, {name: "btnCancel"});
+        btnCancel.helpTip = "Closes the dialog and does not save any changes";
+        btnCancel.text = "Cancel";
+        btnCancel.preferredSize.width = 111;
+
+        var btnSaveAndCancel = grpCloseButtons.add("button", undefined, undefined, {name: "btnSaveAndCancel"});
+        btnSaveAndCancel.helpTip = "Closes the dialog but saves any changes made";
+        btnSaveAndCancel.text = "Save and Close";
+    }
+
+    var cbOverwriteFiles = grpActions.add("checkbox", undefined, undefined, {name: "cbOverwriteFiles"});
+    cbOverwriteFiles.helpTip = "If checked, will overwrite existing files if they have the same name. Otherwise it will make unique copies";
+    cbOverwriteFiles.text = "Overwrite Existing Files";
+    cbOverwriteFiles.alignment = ["center", "top"];
+
+    var cbSilent = grpActions.add("checkbox", undefined, undefined, {name: "cbSilent"});
+    cbSilent.helpTip = "If checked, export runs without a progress bar or success confirmation.";
+    cbSilent.text = "Export silently";
+    cbSilent.alignment = ["center", "top"];
+
+    // DIALOG footer (hidden in CSV-focused mode)
     // ======
-    var lblMetadata = dialog.add("statictext", undefined, undefined, {name: "lblMetadata"}); 
-    lblMetadata.text = "This document contains {0} layer(s), {1} of them visible, {2} selected"; 
-    lblMetadata.justify = "center"; 
+    if (!CSV_FOCUSED_UI) {
+        var lblMetadata = dialog.add("statictext", undefined, undefined, {name: "lblMetadata"});
+        lblMetadata.text = "This document contains {0} layer(s), {1} of them visible, {2} selected";
+        lblMetadata.justify = "center";
 
-    var lblContact = dialog.add("group"); 
-    lblContact.orientation = "column"; 
-    lblContact.alignChildren = ["center","center"]; 
-    lblContact.spacing = 0; 
+        var lblContact = dialog.add("group");
+        lblContact.orientation = "column";
+        lblContact.alignChildren = ["center", "center"];
+        lblContact.spacing = 0;
 
-    lblContact.add("statictext", undefined, "To get the most recent version, or leave feedback, go to:", {name: "lblContact"}); 
-    lblContact.add("statictext", undefined, "https://github.com/antipalindrome/Photoshop-Export-Layers-to-Files-Fast", {name: "lblContact"}); 
+        lblContact.add("statictext", undefined, "To get the most recent version, or leave feedback, go to:", {name: "lblContact"});
+        lblContact.add("statictext", undefined, "https://github.com/antipalindrome/Photoshop-Export-Layers-to-Files-Fast", {name: "lblContact"});
+    }
+
+    if (CSV_FOCUSED_UI && grpLegacyHidden) {
+        try {
+            grpLegacyHidden.preferredSize = [0, 0];
+            legacyCol.preferredSize = [0, 0];
+        } catch (eLegacyLayout) { }
+        try {
+            grpLegacyHidden.maximumSize = [10000, 1];
+            legacyCol.maximumSize = [10000, 1];
+        } catch (eLegacyMax) { }
+    }
 
   return dialog;
 }
